@@ -11,6 +11,21 @@ val keystorePropertiesFile = rootProject.file("key.properties")
 if (keystorePropertiesFile.exists()) {
     keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
 }
+val releaseSigningConfigured =
+    listOf("keyAlias", "keyPassword", "storeFile", "storePassword").all {
+        !keystoreProperties.getProperty(it).isNullOrBlank()
+    } && file(keystoreProperties.getProperty("storeFile")).isFile
+
+// Reject every release task before execution when signing is unavailable.
+// Debug builds and IDE project configuration remain usable without a keystore.
+gradle.taskGraph.whenReady {
+    if (allTasks.any { it.project == project && it.name.contains("Release") }) {
+        check(releaseSigningConfigured) {
+            "Release signing is required. Configure android/key.properties with " +
+                "keyAlias, keyPassword, storeFile and storePassword, and an existing keystore."
+        }
+    }
+}
 
 android {
     namespace = "com.pjpv.zremote"
@@ -36,7 +51,7 @@ android {
     }
 
     signingConfigs {
-        if (keystorePropertiesFile.exists()) {
+        if (releaseSigningConfigured) {
             create("release") {
                 keyAlias = keystoreProperties.getProperty("keyAlias")
                 keyPassword = keystoreProperties.getProperty("keyPassword")
@@ -48,12 +63,9 @@ android {
 
     buildTypes {
         release {
-            signingConfig =
-                if (keystorePropertiesFile.exists()) {
-                    signingConfigs.getByName("release")
-                } else {
-                    signingConfigs.getByName("debug")
-                }
+            if (releaseSigningConfigured) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 }
