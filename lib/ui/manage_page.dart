@@ -73,9 +73,13 @@ class ManagePage extends ConsumerWidget {
                 physics: const NeverScrollableScrollPhysics(),
                 padding: const EdgeInsets.symmetric(vertical: 2),
                 buildDefaultDragHandles: false,
-                onReorder: (oldIndex, newIndex) => ref
+                onReorderItem: (oldIndex, newIndex) => ref
                     .read(deviceListProvider.notifier)
-                    .reorder(oldIndex, newIndex),
+                    // The notifier accepts the index before item removal.
+                    .reorder(
+                      oldIndex,
+                      newIndex > oldIndex ? newIndex + 1 : newIndex,
+                    ),
                 children: [
                   for (var i = 0; i < devices.length; i++)
                     _DeviceCard(
@@ -181,11 +185,7 @@ class ManagePage extends ConsumerWidget {
 }
 
 class _PasteDialog extends StatefulWidget {
-  const _PasteDialog({
-    required this.l10n,
-    this.title,
-    this.actionLabel,
-  });
+  const _PasteDialog({required this.l10n, this.title, this.actionLabel});
 
   final AppLocalizations l10n;
 
@@ -481,10 +481,8 @@ class _DeviceCard extends ConsumerWidget {
     final l10n = AppLocalizations.of(context)!;
     final name = await showDialog<String>(
       context: context,
-      builder: (dialogContext) => _RenameDialog(
-        l10n: l10n,
-        initialName: device.label,
-      ),
+      builder: (dialogContext) =>
+          _RenameDialog(l10n: l10n, initialName: device.label),
     );
     final ok = name != null && name.trim().isNotEmpty;
     if (ok && context.mounted) {
@@ -939,7 +937,11 @@ class _PermDeniedView extends StatelessWidget {
             Text(
               l10n.scannerPermBody,
               textAlign: TextAlign.center,
-              style: const TextStyle(fontSize: 13, height: 1.5, color: Colors.white70),
+              style: const TextStyle(
+                fontSize: 13,
+                height: 1.5,
+                color: Colors.white70,
+              ),
             ),
             const SizedBox(height: 22),
             FilledButton.icon(

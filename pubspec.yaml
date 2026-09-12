@@ -31,6 +31,11 @@ dev_dependencies:
 
   flutter_lints: ^6.0.0
 
+dependency_overrides:
+  # Stable Android plugin with the reviewed bridge input-validation patch.
+  flutter_inappwebview_android:
+    path: third_party/flutter_inappwebview_android
+
 flutter:
 
   uses-material-design: true

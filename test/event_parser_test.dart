@@ -19,7 +19,6 @@ RemoteDevice _device(String label) => RemoteDevice(
 
 void main() {
   group('EventParser.parseMessage', () {
-
     test('单事件：permission_request + taskId + title', () {
       const body =
           '{"event":"permission_request","taskId":"t1","title":"Bash","description":"rm -rf build"}';
@@ -102,16 +101,15 @@ void main() {
     });
 
     test('上报走 zrEvents handler', () {
-      expect(
-        EventObserver.hookScript.contains("post('zrEvents'"),
-        isTrue,
-      );
+      expect(EventObserver.hookScript.contains("post('zrEvents'"), isTrue);
     });
 
     test('早桥队列（r8 根因修复）：桥未就绪缓存、就绪后按序冲刷', () {
       final s = EventObserver.hookScript;
-      expect(s.contains("addEventListener('flutterInAppWebViewPlatformReady'"),
-          isTrue);
+      expect(
+        s.contains("addEventListener('flutterInAppWebViewPlatformReady'"),
+        isTrue,
+      );
       expect(s.contains("post('zrViewState', b)"), isTrue);
       expect(s.contains("post('zrWs', event)"), isTrue);
       expect(s.contains('qMaxEntries'), isTrue);
@@ -159,14 +157,48 @@ void main() {
       expect(s.contains("ws.addEventListener('message'"), isTrue);
     });
 
-    test('体积预检对称：缺 messageBytes 的帧用 base64 长度估算兜底', () {
+    test('分片只相信实际字节数，不信任远端messageBytes', () {
       final s = EventObserver.hookScript;
-      expect(s.contains('p.messageBytes != null'), isTrue);
-      expect(s.contains('* 0.75'), isTrue);
+      expect(s.contains('p.messageBytes'), isFalse);
+      expect(s.contains('asmBytes + partBytes.length'), isTrue);
     });
 
     test('分片计数去重：重复投递同一 fragmentIndex 不递增 got', () {
-      expect(EventObserver.hookScript.contains('in slot.parts'), isTrue);
+      expect(
+        EventObserver.hookScript.contains('hasOwnProperty.call(slot.parts'),
+        isTrue,
+      );
+    });
+  });
+
+  group('EventObserver.bridgeBody', () {
+    test('只有此会话nonce及两个参数可进入Dart处理', () {
+      expect(EventObserver.bridgeBody(['secret', '{}'], 'secret'), '{}');
+      for (final args in <List<dynamic>>[
+        ['{}'],
+        ['other', '{}'],
+        ['secret', {}],
+        ['secret', '{}', 'extra'],
+      ]) {
+        expect(EventObserver.bridgeBody(args, 'secret'), isNull);
+      }
+    });
+
+    test('真实UTF8字节数超限拒绝，不仅判断字符长度', () {
+      expect(
+        EventObserver.bridgeBody([
+          'secret',
+          'x' * (kMaxListenBytes + 1),
+        ], 'secret'),
+        isNull,
+      );
+      expect(
+        EventObserver.bridgeBody([
+          'secret',
+          '中' * (kMaxListenBytes ~/ 3 + 1),
+        ], 'secret'),
+        isNull,
+      );
     });
   });
 
@@ -428,8 +460,9 @@ void main() {
       final differ = StateDiffer();
       differ.apply(SessionStateExtractor.parse(frameBaseline));
       differ.apply(SessionStateExtractor.parse(framePermAppears));
-      final events =
-          differ.apply(SessionStateExtractor.parse(framePermResolved));
+      final events = differ.apply(
+        SessionStateExtractor.parse(framePermResolved),
+      );
       expect(events, hasLength(1));
       expect(events.first.type, 'resolved');
       expect(events.first.taskId, 'sess_b');
@@ -449,8 +482,9 @@ void main() {
     test('差分：userInput 归零（2→0）也发 resolved', () {
       final differ = StateDiffer();
       differ.apply(SessionStateExtractor.parse(frameUserInput));
-      final events =
-          differ.apply(SessionStateExtractor.parse(frameUserInputResolved));
+      final events = differ.apply(
+        SessionStateExtractor.parse(frameUserInputResolved),
+      );
       expect(events, hasLength(1));
       expect(events.first.type, 'resolved');
       expect(events.first.taskId, 'sess_c');
@@ -539,10 +573,7 @@ void main() {
     test('差分：移除未知 sessionId 是 no-op', () {
       final differ = StateDiffer();
       differ.apply(SessionStateExtractor.parse(framePermAppears));
-      expect(
-        differ.apply(const [], removed: ['sess_unknown']),
-        isEmpty,
-      );
+      expect(differ.apply(const [], removed: ['sess_unknown']), isEmpty);
     });
 
     test('差分：非 sessions-index 帧（空提取）不清空 _prev', () {
@@ -562,9 +593,7 @@ void main() {
         const [],
         removed: SessionStateExtractor.parseRemoved(frameRemovedB),
       );
-      final again = differ.apply(
-        SessionStateExtractor.parse(framePermAppears),
-      );
+      final again = differ.apply(SessionStateExtractor.parse(framePermAppears));
       expect(again, hasLength(1));
       expect(again.first.type, 'permission_request');
     });
@@ -614,10 +643,7 @@ void main() {
     });
 
     test('workspaceBasenameOf：取最后一个 / 或 \\\\ 之后的末段并 trim，取不到则 null', () {
-      expect(
-        SessionStateExtractor.workspaceBasenameOf('W:\\ws\\demo'),
-        'demo',
-      );
+      expect(SessionStateExtractor.workspaceBasenameOf('W:\\ws\\demo'), 'demo');
       expect(
         SessionStateExtractor.workspaceBasenameOf('/home/ubuntu/proj'),
         'proj',
@@ -627,7 +653,10 @@ void main() {
         SessionStateExtractor.workspaceBasenameOf('  D:\\x\\app  '),
         'app',
       );
-      expect(SessionStateExtractor.workspaceBasenameOf('D:\\tmp\\app\\'), isNull);
+      expect(
+        SessionStateExtractor.workspaceBasenameOf('D:\\tmp\\app\\'),
+        isNull,
+      );
       expect(SessionStateExtractor.workspaceBasenameOf('   '), isNull);
       expect(SessionStateExtractor.workspaceBasenameOf(''), isNull);
       expect(SessionStateExtractor.workspaceBasenameOf(null), isNull);
@@ -832,8 +861,10 @@ void main() {
         isFalse,
       );
       expect(TaskIndexExtractor.isBootstrapResult(null), isFalse);
-      expect(TaskIndexExtractor.isBootstrapResult(jsonDecode('{"x":1}')),
-          isFalse);
+      expect(
+        TaskIndexExtractor.isBootstrapResult(jsonDecode('{"x":1}')),
+        isFalse,
+      );
       expect(
         TaskIndexExtractor.isBootstrapResult(
           jsonDecode('{"payload":{"result":{"tasks":[]}}}'),
@@ -868,7 +899,6 @@ void main() {
   });
 
   group('MobileViewStateSync（mobile-view-state POST 请求体）', () {
-
     test('带 taskId（打开任务）→ valid + taskId', () {
       const body =
           '{"activeWorkspaceKey":"W:\\\\ws\\\\demo","activeTaskId":"sess_abc",'

@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:local_auth/local_auth.dart';
 
 class BiometricService {
@@ -62,4 +63,25 @@ class BiometricUnavailableException implements Exception {
 
   @override
   String toString() => cause.toString();
+}
+
+/// Native protection complements the Flutter cover during snapshot capture.
+abstract final class ScreenPrivacy {
+  static const _channel = MethodChannel('zremote/privacy');
+
+  static Future<void> update({
+    required bool enabled,
+    required bool foreground,
+  }) async {
+    try {
+      await _channel.invokeMethod<void>('setScreenPrivacy', {
+        'enabled': enabled,
+        'foreground': foreground,
+      });
+    } on MissingPluginException {
+      // Other targets retain the Flutter cover and focus exclusion.
+    } on PlatformException {
+      // A native protection failure must never unlock the Flutter gate.
+    }
+  }
 }

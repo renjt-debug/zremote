@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:collection';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -34,6 +35,9 @@ class SessionView extends ConsumerStatefulWidget {
 }
 
 class _SessionViewState extends ConsumerState<SessionView> {
+  final String _bridgeNonce = base64UrlEncode(
+    List<int>.generate(32, (_) => Random.secure().nextInt(256)),
+  );
   InAppWebViewController? _controller;
   bool _loading = true;
   bool _errorShown = false;
@@ -177,24 +181,36 @@ class _SessionViewState extends ConsumerState<SessionView> {
     _activeSessionNotifier?.report(widget.device.id, r.taskId);
   }
 
-  URLRequest _freshRequest() =>
-      URLRequest(url: WebUri(LinkBuilder.buildUrl(widget.device).toString()));
+  URLRequest? _freshRequest() {
+    final uri = LinkBuilder.tryBuildUrl(widget.device);
+    return uri == null ? null : URLRequest(url: WebUri(uri.toString()));
+  }
 
   Future<void> _manualReload() async {
+    final request = _freshRequest();
+    if (request == null) {
+      setState(() {
+        _loading = false;
+        _errorShown = true;
+      });
+      _report(SessionStatus.error);
+      return;
+    }
     setState(() {
       _loading = true;
       _errorShown = false;
     });
     _report(SessionStatus.loading);
-    await _controller?.loadUrl(urlRequest: _freshRequest());
+    await _controller?.loadUrl(urlRequest: request);
   }
 
   Future<void> _onLoadError() async {
+    final request = _freshRequest();
     final now = DateTime.now();
-    if (now.difference(_lastAutoReload).inSeconds >= 30) {
+    if (request != null && now.difference(_lastAutoReload).inSeconds >= 30) {
       _lastAutoReload = now;
       _report(SessionStatus.loading);
-      await _controller?.loadUrl(urlRequest: _freshRequest());
+      await _controller?.loadUrl(urlRequest: request);
       return;
     }
     if (mounted) {
@@ -348,6 +364,7 @@ class _SessionViewState extends ConsumerState<SessionView> {
   Widget build(BuildContext context) {
     final status = ref.watch(sessionStatusProvider)[widget.device.id];
     final l10n = AppLocalizations.of(context)!;
+    final initialRequest = _freshRequest();
 
     return Scaffold(
       appBar: AppBar(
@@ -383,7 +400,7 @@ class _SessionViewState extends ConsumerState<SessionView> {
         ),
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(2),
-          child: _loading
+          child: _loading && initialRequest != null
               ? const LinearProgressIndicator(
                   minHeight: 2,
                   backgroundColor: Colors.transparent,
@@ -405,7 +422,7 @@ class _SessionViewState extends ConsumerState<SessionView> {
       ),
       body: Column(
         children: [
-          if (_errorShown)
+          if (_errorShown || initialRequest == null)
             Container(
               width: double.infinity,
               color: ZT.danger.withValues(alpha: 0.10),
@@ -432,7 +449,9 @@ class _SessionViewState extends ConsumerState<SessionView> {
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          l10n.errorBannerDetail,
+                          initialRequest == null
+                              ? l10n.importFailed
+                              : l10n.errorBannerDetail,
                           style: const TextStyle(
                             fontSize: 12,
                             color: ZT.textLo,
@@ -450,81 +469,134 @@ class _SessionViewState extends ConsumerState<SessionView> {
               ),
             ),
           Expanded(
-            child: InAppWebView(
-              initialUrlRequest: _freshRequest(),
-              initialUserScripts: UnmodifiableListView([
-                UserScript(
-                  source: EventObserver.hookScript,
-                  injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
-                ),
-              ]),
-              initialSettings: InAppWebViewSettings(
-                javaScriptEnabled: true,
-                domStorageEnabled: true,
-                supportZoom: false,
-                useHybridComposition: false,
-              ),
-              onWebViewCreated: (controller) {
-                _controller = controller;
-                controller.addJavaScriptHandler(
-                  handlerName: 'zrEvents',
-                  callback: (args) {
-                    final body = args.isNotEmpty ? args.first : null;
-                    if (body is String) _onBridgeMessage(body);
-                    return null;
-                  },
-                );
-                controller.addJavaScriptHandler(
-                  handlerName: 'zrViewState',
-                  callback: (args) {
-                    final body = args.isNotEmpty ? args.first : null;
-                    if (body is String) _onViewStateSync(body);
-                    return null;
-                  },
-                );
-                controller.addJavaScriptHandler(
-                  handlerName: 'zrWs',
-                  callback: (args) {
-                    final body = args.isNotEmpty ? args.first : null;
-                    if (body is String) _onWsEvent(body);
-                    return null;
-                  },
-                );
-              },
-              onLoadStart: (_, _) {
-                if (mounted) {
-                  setState(() {
-                    _loading = true;
-                    _errorShown = false;
-                  });
-                  _report(SessionStatus.loading);
-                }
-              },
-              onLoadStop: (_, _) {
-                if (mounted) {
-                  setState(() => _loading = false);
-                }
-              },
-              onReceivedError: (controller, request, error) async {
-                if (!mounted) return;
-                if (!PageLoadPolicy.isMainDocFailure(request.isForMainFrame)) {
-                  return;
-                }
-                setState(() => _loading = false);
-                await _onLoadError();
-              },
-              onReceivedHttpError: (controller, request, errorResponse) async {
-                if (!mounted) return;
-                if (!PageLoadPolicy.isHttpFailure(
-                  request.isForMainFrame,
-                  errorResponse.statusCode,
-                )) {
-                  return;
-                }
-                setState(() => _loading = false);
-                await _onLoadError();
-              },
-            ),
+            child: initialRequest == null
+                ? const SizedBox.shrink()
+                : InAppWebView(
+                    initialUrlRequest: initialRequest,
+                    initialUserScripts: UnmodifiableListView([
+                      UserScript(
+                        source: EventObserver.scriptFor(_bridgeNonce),
+                        injectionTime:
+                            UserScriptInjectionTime.AT_DOCUMENT_START,
+                        forMainFrameOnly: true,
+                        allowedOriginRules: {LinkBuilder.trustedOrigin},
+                      ),
+                    ]),
+                    initialSettings: InAppWebViewSettings(
+                      javaScriptEnabled: true,
+                      domStorageEnabled: true,
+                      supportZoom: false,
+                      useHybridComposition: false,
+                      useShouldOverrideUrlLoading: true,
+                      useShouldInterceptRequest: true,
+                      regexToCancelSubFramesLoading: r'.*',
+                      allowFileAccess: false,
+                      allowContentAccess: false,
+                      allowFileAccessFromFileURLs: false,
+                      allowUniversalAccessFromFileURLs: false,
+                      mixedContentMode:
+                          MixedContentMode.MIXED_CONTENT_NEVER_ALLOW,
+                      javaScriptCanOpenWindowsAutomatically: false,
+                      supportMultipleWindows: false,
+                    ),
+                    shouldOverrideUrlLoading: (_, navigation) async =>
+                        navigation.isForMainFrame &&
+                            LinkBuilder.allowsNavigation(
+                              navigation.request.url?.toString(),
+                            )
+                        ? NavigationActionPolicy.ALLOW
+                        : NavigationActionPolicy.CANCEL,
+                    shouldInterceptRequest: (_, request) async {
+                      // Android does not call shouldOverrideUrlLoading for POSTs.
+                      if (request.isForMainFrame == true &&
+                          (!LinkBuilder.allowsNavigation(
+                                request.url.toString(),
+                              ) ||
+                              (request.method != null &&
+                                  request.method != 'GET' &&
+                                  request.method != 'HEAD'))) {
+                        return WebResourceResponse(
+                          statusCode: 403,
+                          reasonPhrase: 'Blocked',
+                          contentType: 'text/plain',
+                          data: Uint8List(0),
+                        );
+                      }
+                      return null;
+                    },
+                    onWebViewCreated: (controller) {
+                      _controller = controller;
+                      controller.addJavaScriptHandler(
+                        handlerName: 'zrEvents',
+                        callback: (args) {
+                          final body = EventObserver.bridgeBody(
+                            args,
+                            _bridgeNonce,
+                          );
+                          if (body != null) _onBridgeMessage(body);
+                          return null;
+                        },
+                      );
+                      controller.addJavaScriptHandler(
+                        handlerName: 'zrViewState',
+                        callback: (args) {
+                          final body = EventObserver.bridgeBody(
+                            args,
+                            _bridgeNonce,
+                          );
+                          if (body != null) _onViewStateSync(body);
+                          return null;
+                        },
+                      );
+                      controller.addJavaScriptHandler(
+                        handlerName: 'zrWs',
+                        callback: (args) {
+                          final body = EventObserver.bridgeBody(
+                            args,
+                            _bridgeNonce,
+                          );
+                          if (body != null) _onWsEvent(body);
+                          return null;
+                        },
+                      );
+                    },
+                    onLoadStart: (_, _) {
+                      if (mounted) {
+                        setState(() {
+                          _loading = true;
+                          _errorShown = false;
+                        });
+                        _report(SessionStatus.loading);
+                      }
+                    },
+                    onLoadStop: (_, _) {
+                      if (mounted) {
+                        setState(() => _loading = false);
+                      }
+                    },
+                    onReceivedError: (controller, request, error) async {
+                      if (!mounted) return;
+                      if (!PageLoadPolicy.isMainDocFailure(
+                        request.isForMainFrame,
+                      )) {
+                        return;
+                      }
+                      setState(() => _loading = false);
+                      await _onLoadError();
+                    },
+                    onReceivedHttpError:
+                        (controller, request, errorResponse) async {
+                          if (!mounted) return;
+                          if (!PageLoadPolicy.isHttpFailure(
+                            request.isForMainFrame,
+                            errorResponse.statusCode,
+                          )) {
+                            return;
+                          }
+                          setState(() => _loading = false);
+                          await _onLoadError();
+                        },
+                  ),
           ),
         ],
       ),

@@ -10,7 +10,7 @@
   "importScanLabel": "Scan QR to import",
   "pasteDialogTitle": "Paste control link",
   "importButton": "Import",
-  "importFailed": "Import failed: the link must include sid and hash parameters",
+  "importFailed": "Import failed: use an official https://zcode.z.ai link with valid sid and hash parameters",
   "manyDevicesTitle": "Quite a few devices",
   "manyDevicesBody": "More live WebView sessions means more memory. With 6+ devices, low-RAM phones may kill the app in the background. Continue?",
   "emptyTitle": "No devices yet",
@@ -40,7 +40,7 @@
   "scannerPermTitle": "Camera unavailable",
   "scannerPermBody": "Scanning needs camera access. Allow it for ZRemote in system settings, then come back.",
   "scannerPermOpenSettings": "Open settings",
-  "invalidQr": "Not a valid remote-control QR code (missing sid/hash)",
+  "invalidQr": "Invalid QR code: use an official https://zcode.z.ai link with valid sid and hash parameters",
   "importDuplicate": "{name} is already imported — switched to it",
 
   "switchDevice": "Switch device",

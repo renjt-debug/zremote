@@ -54,10 +54,63 @@ void main() {
       expect(d.label, '');
     });
 
-    test('带端口与非标准路径可用', () {
-      const url = 'https://relay.example.com:8443/remote/v4?sid=s&hash=h';
+    test('官方 HTTPS 默认端口可用', () {
+      const url = 'https://zcode.z.ai:443/remote/v4?sid=s&hash=h';
       final d = LinkBuilder.parse(url)!;
-      expect(d.baseUrl, 'https://relay.example.com:8443/remote/v4');
+      expect(Uri.parse(d.baseUrl).port, 443);
+    });
+
+    test('拒绝非官方来源、HTTP、非默认端口和userinfo', () {
+      for (final base in [
+        'http://zcode.z.ai/remote/v4',
+        'https://relay.example.com/remote/v4',
+        'https://zcode.z.ai.evil.example/remote/v4',
+        'https://sub.zcode.z.ai/remote/v4',
+        'https://zcode.z.ai./remote/v4',
+        'https://zcode.z.ai:8443/remote/v4',
+        'https://user@zcode.z.ai/remote/v4',
+        'https://zcode.z.ai@evil.example/remote/v4',
+      ]) {
+        expect(LinkBuilder.parse('$base?sid=s&hash=h'), isNull, reason: base);
+        expect(LinkBuilder.allowsNavigation(base), isFalse, reason: base);
+      }
+    });
+
+    test('拒绝重复参数、畸形转义、控制字符和超长输入', () {
+      for (final query in [
+        'sid=s&sid=t&hash=h',
+        'sid=s&hash=%',
+        'sid=s&hash=%GG',
+        'sid=s&hash=%0A',
+        'sid=s&hash=${'a' * (LinkBuilder.maxParameterLength + 1)}',
+        'sid=s&hash=h&name=${'a' * 257}',
+      ]) {
+        expect(LinkBuilder.parse('https://zcode.z.ai/?$query'), isNull);
+      }
+      expect(
+        LinkBuilder.parse(
+          'https://zcode.z.ai/${'a' * LinkBuilder.maxLinkLength}?sid=s&hash=h',
+        ),
+        isNull,
+      );
+    });
+
+    test('导航仅允许官方HTTPS，包括同源片段', () {
+      expect(
+        LinkBuilder.allowsNavigation('https://zcode.z.ai/remote/v4#task'),
+        isTrue,
+      );
+      for (final url in [
+        'file:///data/x',
+        'content://x',
+        'javascript:alert(1)',
+        'data:text/html,hi',
+        'intent://zcode.z.ai',
+        'about:blank',
+        null,
+      ]) {
+        expect(LinkBuilder.allowsNavigation(url), isFalse);
+      }
     });
   });
 
@@ -84,6 +137,26 @@ void main() {
       LinkBuilder.buildUrl(d, now: DateTime.fromMillisecondsSinceEpoch(1));
       expect(d.params, before);
       expect(d.params.containsKey('t'), isTrue);
+    });
+
+    test('旧存储的非法来源或缺少凭据不能生成网络请求', () {
+      final d = LinkBuilder.parse(sampleUrl)!;
+      RemoteDevice stored(String baseUrl, Map<String, String> params) =>
+          RemoteDevice(
+            id: d.id,
+            baseUrl: baseUrl,
+            params: params,
+            label: d.label,
+            createdAt: d.createdAt,
+          );
+      for (final old in [
+        stored('https://evil.example/', d.params),
+        stored('http://zcode.z.ai/', d.params),
+        stored(d.baseUrl, const {'sid': 's'}),
+      ]) {
+        expect(LinkBuilder.tryBuildUrl(old), isNull);
+        expect(() => LinkBuilder.buildUrl(old), throwsFormatException);
+      }
     });
   });
 

@@ -190,25 +190,22 @@ class _BiometricTile extends ConsumerWidget {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
     }
 
-    if (value) {
-      final available = await BiometricService.instance.isAvailable();
-      if (!available) {
-        if (context.mounted) toast(l10n.biometricUnavailableToast);
-        return;
-      }
-    }
-
     final bool ok;
     try {
+      if (value) {
+        final available = await BiometricService.instance.isAvailable();
+        if (!context.mounted) return;
+        if (!available) {
+          toast(l10n.biometricUnavailableToast);
+          return;
+        }
+      }
       ok = await BiometricService.instance.authenticate(
         value ? l10n.biometricEnableReason : l10n.biometricDisableReason,
       );
     } on BiometricUnavailableException {
-      if (!value) await ref.read(biometricProvider.notifier).set(false);
       if (context.mounted) {
-        toast(
-          value ? l10n.biometricNoLockToast : l10n.biometricForceDisabledToast,
-        );
+        toast(l10n.biometricUnavailableToast);
       }
       return;
     } catch (e) {
@@ -216,7 +213,7 @@ class _BiometricTile extends ConsumerWidget {
       return;
     }
 
-    if (ok) {
+    if (ok && context.mounted) {
       await ref.read(biometricProvider.notifier).set(value);
     }
   }

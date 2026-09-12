@@ -3,27 +3,62 @@ import 'dart:convert';
 const int kMaxListenBytes = 4194304;
 
 abstract final class EventObserver {
-  static const String hookScript = '''
+  static String scriptFor(String nonce) =>
+      hookScript.replaceFirst("'__ZR_NONCE__'", jsonEncode(nonce));
+
+  static String? bridgeBody(List<dynamic> args, String nonce) {
+    if (args.length != 2 || args[0] != nonce || args[1] is! String) return null;
+    final body = args[1] as String;
+    if (body.isEmpty ||
+        body.length > kMaxListenBytes ||
+        utf8.encode(body).length > kMaxListenBytes) {
+      return null;
+    }
+    return body;
+  }
+
+  static const String hookScript =
+      '''
 (function() {
+  // Android's forMainFrameOnly flag is not implemented by plugin 6.1.5.
+  if (window !== window.top || window.location.origin !== 'https://zcode.z.ai') return;
   if (window.__zrHooked) return;
   window.__zrHooked = true;
+  var nonce = '__ZR_NONCE__';
+  var byteLength = function(body) {
+    if (typeof body !== 'string' || body.length > $kMaxListenBytes) return -1;
+    var size = 0;
+    for (var i = 0; i < body.length; i++) {
+      var code = body.charCodeAt(i);
+      if (code < 128) size++;
+      else if (code < 2048) size += 2;
+      else if (code >= 55296 && code <= 56319 && i + 1 < body.length &&
+          body.charCodeAt(i + 1) >= 56320 && body.charCodeAt(i + 1) <= 57343) {
+        size += 4; i++;
+      } else size += 3;
+      if (size > $kMaxListenBytes) return -1;
+    }
+    return size;
+  };
   var q = [];
   var qBytes = 0;
   var qMaxEntries = 2048;
   var post = function(name, body) {
     try {
+      var size = byteLength(body);
+      if (size <= 0) return;
       var h = window.flutter_inappwebview;
       if (h && h.callHandler) {
-        h.callHandler(name, body);
+        h.callHandler(name, nonce, body).catch(function() {});
         return;
       }
       if (q.length >= qMaxEntries) {
-        qBytes -= q.shift().b.length;
+        qBytes -= q.shift().size;
       }
-      q.push({ n: name, b: body });
-      qBytes += body.length;
-      while (qBytes > $kMaxListenBytes && q.length > 1) {
-        qBytes -= q.shift().b.length;
+      q.push({ n: name, b: body, size: size });
+      qBytes += size;
+      while (qBytes > $kMaxListenBytes) {
+        qBytes -= q.shift().size;
       }
     } catch (e) {}
   };
@@ -32,8 +67,8 @@ abstract final class EventObserver {
     if (!h || !h.callHandler) return false;
     while (q.length > 0) {
       var m = q.shift();
-      qBytes -= m.b.length;
-      try { h.callHandler(m.n, m.b); } catch (e) {}
+      qBytes -= m.size;
+      try { h.callHandler(m.n, nonce, m.b).catch(function() {}); } catch (e) {}
     }
     return true;
   };
@@ -42,10 +77,21 @@ abstract final class EventObserver {
     if (flush()) clearInterval(flushTimer);
   }, 120);
   var send = function(body) { post('zrEvents', body); };
-  var asm = {};
+  var asm = Object.create(null);
   var asmOrder = [];
+  var asmBytes = 0;
+  var drop = function(id) {
+    var slot = asm[id];
+    if (!slot) return;
+    asmBytes -= slot.bytes;
+    delete asm[id];
+    var index = asmOrder.indexOf(id);
+    if (index >= 0) asmOrder.splice(index, 1);
+  };
   var b64Bytes = function(b64) {
+    if (b64.length > Math.ceil($kMaxListenBytes / 3) * 4) return null;
     var bin = atob(b64);
+    if (bin.length > $kMaxListenBytes) return null;
     var bytes = new Uint8Array(bin.length);
     for (var k = 0; k < bin.length; k++) bytes[k] = bin.charCodeAt(k);
     return bytes;
@@ -53,29 +99,35 @@ abstract final class EventObserver {
   var tryDecodePayload = function(p) {
     try {
       if (!p || typeof p.dataBase64 !== 'string' || p.dataBase64.length === 0) return;
-      var sizeHint = p.messageBytes != null ? p.messageBytes : Math.ceil(p.dataBase64.length * 0.75);
-      var bytesCapOk = sizeHint < $kMaxListenBytes;
-      if (!bytesCapOk) return;
+      // messageBytes is remote input. Only actual decoded sizes enforce limits.
+      var now = Date.now();
+      asmOrder.slice().forEach(function(id) {
+        if (now - asm[id].createdAt > 30000) drop(id);
+      });
       var bytes;
-      if (p.kind === 'fragment' && p.fragmentCount > 1) {
+      if (p.kind === 'fragment') {
         var id = p.logicalFrameId;
-        if (!id) return;
+        if (typeof id !== 'string' || !id || id.length > 256 ||
+            !Number.isInteger(p.fragmentCount) || p.fragmentCount < 1 || p.fragmentCount > 1024 ||
+            !Number.isInteger(p.fragmentIndex) || p.fragmentIndex < 0 || p.fragmentIndex >= p.fragmentCount) return;
         var slot = asm[id];
+        if (slot && slot.total !== p.fragmentCount) { drop(id); return; }
+        if (slot && Object.prototype.hasOwnProperty.call(slot.parts, p.fragmentIndex)) return;
+        var partBytes = b64Bytes(p.dataBase64);
+        if (!partBytes || asmBytes + partBytes.length > $kMaxListenBytes) { drop(id); return; }
         if (!slot) {
-          if (asmOrder.length > 32) { delete asm[asmOrder.shift()]; }
-          slot = asm[id] = { parts: {}, got: 0, total: p.fragmentCount };
+          if (asmOrder.length >= 32) drop(asmOrder[0]);
+          slot = asm[id] = { parts: Object.create(null), got: 0, total: p.fragmentCount,
+            bytes: 0, createdAt: now };
           asmOrder.push(id);
         }
-        if (!(p.fragmentIndex in slot.parts)) slot.got++;
-        slot.parts[p.fragmentIndex] = b64Bytes(p.dataBase64);
+        slot.got++;
+        slot.parts[p.fragmentIndex] = partBytes;
+        slot.bytes += partBytes.length;
+        asmBytes += partBytes.length;
         if (slot.got < slot.total) return;
-        delete asm[id];
-        var idx = asmOrder.indexOf(id);
-        if (idx >= 0) asmOrder.splice(idx, 1);
-        var size = 0;
-        for (var q = 0; q < slot.total; q++) size += (slot.parts[q] || {length:0}).length;
-        if (size > $kMaxListenBytes) return;
-        bytes = new Uint8Array(size);
+        drop(id);
+        bytes = new Uint8Array(slot.bytes);
         var off = 0;
         for (var q2 = 0; q2 < slot.total; q2++) {
           var part = slot.parts[q2];
@@ -86,6 +138,7 @@ abstract final class EventObserver {
       } else {
         bytes = b64Bytes(p.dataBase64);
       }
+      if (!bytes) return;
       var text = new TextDecoder('utf-8', {fatal: false}).decode(bytes);
       if (text && text.length > 0) {
         var first = text.indexOf('{');
@@ -98,11 +151,47 @@ abstract final class EventObserver {
     } catch (e) {}
   };
   var sendWithDecode = function(body) {
+    if (byteLength(body) <= 0) return;
     send(body);
     try {
       var env = JSON.parse(body);
       tryDecodePayload(env && env.payload);
     } catch (e) {}
+  };
+  var pendingReads = 0;
+  var readResponse = function(res) {
+    if (pendingReads >= 4 || !res.body || !res.body.getReader) return;
+    pendingReads++;
+    var reader, data;
+    try {
+      reader = res.clone().body.getReader();
+      data = new Uint8Array($kMaxListenBytes);
+    } catch (e) { pendingReads--; return; }
+    var total = 0, chunks = 0, finished = false;
+    var finish = function(cancel) {
+      if (finished) return;
+      finished = true;
+      pendingReads--;
+      if (cancel) { try { reader.cancel().catch(function() {}); } catch (e) {} }
+      try { reader.releaseLock(); } catch (e) {}
+    };
+    var read = function() {
+      reader.read().then(function(result) {
+        if (result.done) {
+          send(new TextDecoder('utf-8', {fatal: false}).decode(data.subarray(0, total)));
+          finish(false);
+          return;
+        }
+        if (++chunks > 65536 || total + result.value.byteLength > $kMaxListenBytes) {
+          finish(true); return;
+        }
+        data.set(result.value, total);
+        total += result.value.byteLength;
+        // Do not retain a promise chain or an object per streamed chunk.
+        read();
+      }).catch(function() { finish(true); });
+    };
+    read();
   };
   var origFetch = window.fetch;
   if (origFetch) {
@@ -131,9 +220,7 @@ abstract final class EventObserver {
               ? res.headers.get('content-length')
               : null;
           if (cl && +cl > $kMaxListenBytes) return res;
-          res.clone().text().then(function(t) {
-            if (t && t.length > 0 && t.length < $kMaxListenBytes) send(t);
-          }).catch(function() {});
+          readResponse(res);
         } catch (e) {}
         return res;
       });
@@ -176,8 +263,10 @@ abstract final class EventObserver {
             if (typeof d === 'string') {
               sendWithDecode(d);
             } else if (d && typeof d.size === 'number') {
-              if (d.size > 0 && d.size < $kMaxListenBytes) {
-                d.text().then(function(t) { sendWithDecode(t); }).catch(function() {});
+              if (d.size > 0 && d.size <= $kMaxListenBytes && pendingReads < 4) {
+                pendingReads++;
+                d.text().then(function(t) { sendWithDecode(t); }).catch(function() {})
+                    .then(function() { pendingReads--; });
               }
             } else if (d && d.byteLength > 0 && d.byteLength < $kMaxListenBytes) {
               try { sendWithDecode(new TextDecoder('utf-8', {fatal: false}).decode(d)); } catch (e2) {}
@@ -358,20 +447,20 @@ class SessionState {
 
   @override
   int get hashCode => Object.hashAll([
-        sessionId,
-        title,
-        phase,
-        sessionEnded,
-        permissionCount,
-        userInputCount,
-        interactionKind,
-        toolName,
-        description,
-        lastActivityAt,
-        createdAt,
-        workspace,
-        pinned,
-      ]);
+    sessionId,
+    title,
+    phase,
+    sessionEnded,
+    permissionCount,
+    userInputCount,
+    interactionKind,
+    toolName,
+    description,
+    lastActivityAt,
+    createdAt,
+    workspace,
+    pinned,
+  ]);
 }
 
 abstract final class SessionStateExtractor {
@@ -817,18 +906,17 @@ class StateDiffer {
 
   final Map<String, SessionState> _prev = {};
 
-  List<ObservedEvent> apply(List<SessionState> incoming, {List<String> removed = const []}) {
+  List<ObservedEvent> apply(
+    List<SessionState> incoming, {
+    List<String> removed = const [],
+  }) {
     final events = <ObservedEvent>[];
     for (final id in removed) {
       final gone = _prev.remove(id);
       if (gone != null &&
           (gone.permissionCount > 0 || gone.userInputCount > 0)) {
         events.add(
-          ObservedEvent(
-            type: 'resolved',
-            taskId: id,
-            sessionTitle: gone.title,
-          ),
+          ObservedEvent(type: 'resolved', taskId: id, sessionTitle: gone.title),
         );
       }
     }

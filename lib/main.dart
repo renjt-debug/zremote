@@ -85,10 +85,14 @@ class _BiometricGateState extends ConsumerState<BiometricGate>
   bool _startupPrompted = false;
   DateTime? _leftAt;
   bool _authCovered = false;
+  bool _privacyCovered = false;
 
   @override
   void initState() {
     super.initState();
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    _privacyCovered =
+        lifecycle != null && lifecycle != AppLifecycleState.resumed;
     WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -105,6 +109,12 @@ class _BiometricGateState extends ConsumerState<BiometricGate>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Hide sensitive content before the operating system captures the app in
+    // the task switcher. This does not dispose or pause background sessions.
+    final covered = state != AppLifecycleState.resumed;
+    if (_privacyCovered != covered) {
+      setState(() => _privacyCovered = covered);
+    }
     if (state == AppLifecycleState.inactive) {
       if (_authenticating) {
         _authCovered = true;
@@ -127,8 +137,7 @@ class _BiometricGateState extends ConsumerState<BiometricGate>
         return;
       }
       final away = leftAt == null
-          ? widget
-                .relockAfter
+          ? widget.relockAfter
           : DateTime.now().difference(leftAt);
       if (away < widget.relockAfter && _authed) return;
       _relockAndPrompt();
@@ -153,12 +162,8 @@ class _BiometricGateState extends ConsumerState<BiometricGate>
       final reason = (AppLocalizations.of(context) ?? l10nZh).unlockReason;
       final ok = await widget.authenticate(reason);
       if (mounted && ok) setState(() => _authed = true);
-    } on BiometricUnavailableException {
-      if (mounted) {
-        await ref.read(biometricProvider.notifier).set(false);
-        if (mounted) setState(() => _authed = true);
-      }
     } catch (_) {
+      // Authentication failures must not unlock the app or disable its lock.
     } finally {
       _authenticating = false;
     }
@@ -168,12 +173,23 @@ class _BiometricGateState extends ConsumerState<BiometricGate>
   Widget build(BuildContext context) {
     final enabled = ref.watch(biometricProvider);
     final locked = enabled && !_authed;
+    final obscured = enabled && (locked || _privacyCovered);
     final l10n = AppLocalizations.of(context) ?? l10nZh;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ScreenPrivacy.update(
+        enabled: ref.read(biometricProvider),
+        foreground: !_privacyCovered,
+      );
+    });
     return Stack(
       fit: StackFit.expand,
       children: [
-        widget.child,
-        if (locked)
+        ExcludeFocus(
+          excluding: obscured,
+          child: IgnorePointer(ignoring: obscured, child: widget.child),
+        ),
+        if (obscured)
           Positioned.fill(
             child: BlockSemantics(
               blocking: true,
@@ -223,7 +239,7 @@ class _BiometricGateState extends ConsumerState<BiometricGate>
                                   ),
                                   const SizedBox(height: 28),
                                   FilledButton.icon(
-                                    onPressed: _unlock,
+                                    onPressed: _privacyCovered ? null : _unlock,
                                     icon: const Icon(Icons.lock_open, size: 18),
                                     label: Text(l10n.unlockButton),
                                   ),
