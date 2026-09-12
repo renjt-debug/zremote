@@ -35,12 +35,16 @@ Get the latest build from the [Releases](https://github.com/pjpv/zremote/release
 
 Requirements:
 
-- Flutter ≥ 3.38 (Dart ≥ 3.10)
+- Flutter 3.47.4 (Dart 3.13.3, matching CI)
 - JDK 17 (Android builds)
+- Node.js 22 (JavaScript security regression tests)
 - Xcode (iOS builds, macOS only)
 
 ```bash
-flutter pub get
+flutter pub get --enforce-lockfile
+
+# Local development; no release key required
+flutter build apk --debug
 
 # Android
 flutter build apk --release
@@ -48,6 +52,10 @@ flutter build apk --release
 # iOS (unsigned)
 flutter build ios --release --no-codesign
 ```
+
+Android release builds require `keyAlias`, `keyPassword`, `storeFile`, and `storePassword` in `android/key.properties`, plus the matching keystore (`storeFile` is relative to `android/app`). Missing configuration fails the build instead of using a debug signature. CI releases require `KEYSTORE_BASE64` and `KEYSTORE_PASSWORD`, with key alias `zremote`. Never commit signing keys or passwords.
+
+Control links must use `https://zcode.z.ai` on the default HTTPS port. Previously saved links to other hosts will not load. The Android WebView uses a locally patched dependency with its license retained; see the [patch notes](third_party/flutter_inappwebview_android/PATCHES.md) and [security review (Chinese)](docs/SECURITY_REVIEW.zh-CN.md).
 
 ## Usage
 

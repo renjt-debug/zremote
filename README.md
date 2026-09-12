@@ -35,12 +35,16 @@ ZCode 桌面端远程控制的手机伴侣 App。电脑端出示二维码，手�
 
 环境要求：
 
-- Flutter ≥ 3.38（Dart ≥ 3.10）
+- Flutter 3.47.4（Dart 3.13.3，与 CI 一致）
 - JDK 17（Android 构建）
+- Node.js 22（运行 JavaScript 安全回归测试）
 - Xcode（iOS 构建，需 macOS）
 
 ```bash
-flutter pub get
+flutter pub get --enforce-lockfile
+
+# 本地调试，不需要发布密钥
+flutter build apk --debug
 
 # Android
 flutter build apk --release
@@ -48,6 +52,10 @@ flutter build apk --release
 # iOS（未签名）
 flutter build ios --release --no-codesign
 ```
+
+Android 发布构建必须配置 `android/key.properties` 中的 `keyAlias`、`keyPassword`、`storeFile`、`storePassword`，并提供对应密钥库（`storeFile` 相对于 `android/app`）。缺少配置时构建会失败，不再自动使用 debug 签名。CI 发布需配置 `KEYSTORE_BASE64` 和 `KEYSTORE_PASSWORD`；密钥别名为 `zremote`。不要提交私钥或密码。
+
+当前仅接受 `https://zcode.z.ai`、默认 HTTPS 端口的控制链接；旧的非官方链接不会加载。Android WebView 使用仓库内保留许可证的安全补丁，详见 [补丁说明](third_party/flutter_inappwebview_android/PATCHES.md) 和 [安全审查记录](docs/SECURITY_REVIEW.zh-CN.md)。
 
 ## 使用
 
